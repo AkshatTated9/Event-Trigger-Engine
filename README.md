@@ -1,7 +1,7 @@
 <h1 align="center">Listenery Event Trigger Engine</h1>
 
 <p align="center">
-  A backend service between incoming product events and outgoing AI interview invites.
+  NestJS backend that ingests product events and schedules AI interview dispatches.
 </p>
 
 <p align="center">
@@ -13,377 +13,211 @@
 
 ---
 
-This service ingests product events, matches them against client-configured rules, applies
-deterministic sampling, schedules a delayed dispatch, deduplicates repeat sends, and hands
-off to a stubbed sender that logs the payload.
+## Run from scratch
+
+### 1. Prerequisites
+
+Install these before starting:
+
+| Tool | Version | Check |
+|------|---------|-------|
+| [Node.js](https://nodejs.org/) | 18+ (22 recommended) | `node -v` |
+| [Docker](https://www.docker.com/) | any recent | `docker -v` |
+
+You need **PostgreSQL** and **Redis**. The steps below start both with Docker — no local installs required.
 
 ---
 
-## Table of contents
-
-- [Architecture](#architecture)
-- [Event lifecycle](#event-lifecycle)
-- [Core logic](#core-logic)
-  - [Matching](#matching)
-  - [Sampling](#sampling)
-  - [Scheduling](#scheduling)
-  - [Deduplication](#deduplication)
-  - [Dispatch](#dispatch)
-- [Cron sweeper](#cron-sweeper)
-- [Dispatch lifecycle](#dispatch-lifecycle)
-- [Data model](#data-model)
-- [API](#api)
-- [Swagger](#swagger)
-- [Getting started](#getting-started)
-- [Testing](#testing)
-- [Trade-offs and next steps](#trade-offs-and-next-steps)
-
----
-
-## Architecture
-
-```
-Client product
-      │  POST /event/created  (JWT)
-      ▼
-EventsController  ──────────────────────►  { success: true }  (event persisted, processing async)
-      │
-      │  emit "event-created"
-      ▼
-Node.js EventEmitter (in-process, async)
-      │
-      ▼
-EventListener → EventService.processEvent()
-      │  match rules for (client_id, event_name)
-      ▼
-Sampling check (MD5 hash) ──► excluded ──► skip, log
-      │ included
-      ▼
-Dedup check (user, interview, window) ──► duplicate ──► skip, log
-      │ clear
-      ▼
-Create dispatch row (status = scheduled, scheduled_at)
-      │
-      ├── delay ≤ 6 hours ──► enqueue delayed BullMQ job (Redis)
-      │                              │
-      │                              ▼
-      │                        BullMQ Worker → sender stub (logs payload) → mark sent
-      │
-      └── delay > 6 hours ──► stays in Postgres only
-
-Cron Sweeper (every 6 hours)
-      │  finds dispatches that are scheduled, unsent, and due within next 6 hours
-      ▼
-      enqueues into BullMQ
-```
-
-The API, BullMQ worker, and cron sweeper all run in a single NestJS process.
-
----
-
-## Event lifecycle
-
-1. **Register a client** via `POST /auth/register/client` and save the returned JWT.
-2. **Create an interview** via `POST /interviews/create`.
-3. **Create a rule** via `POST /rules/create` linking an `event_name` to an `interview_id`.
-4. **Ingest an event** via `POST /event/created` with `{ event_name, user_id, email, phone, properties, timestamp }`.
-5. **EventsController** saves the raw event to Postgres and returns `{ success: true }` immediately. No matching or scheduling happens on the request path.
-6. The controller emits an in-process `event-created` event.
-7. **EventListener** picks it up asynchronously and:
-   - looks up rules for `(client_id, event_name)` — if none match, returns;
-   - runs the deterministic sample check — if excluded, logs and returns;
-   - checks the dedup window for `(user_id, interview_id)` — if already sent inside the window, logs and returns;
-   - otherwise inserts a `dispatches` row with `status = scheduled` and a computed `scheduled_at`.
-8. If the dispatch is due within the next 6 hours (`rule.delay` in seconds), it is enqueued as a delayed BullMQ job immediately. Otherwise it stays in Postgres for the cron sweeper.
-9. The **cron sweeper** runs every 6 hours, finds due dispatches, and enqueues them into BullMQ.
-10. When a **BullMQ job** fires, the **worker** loads the dispatch, calls the sender stub, and marks the row `sent` (or `failed` on error).
-
----
-
-## Core logic
-
-### Matching
-
-Rules are configured per client and keyed on `event_name`:
-
-```
-Rule { client_id, event_name, interview_id, delay, sample_percentage, dedup_window }
-```
-
-- `delay` — seconds until the dispatch should run
-- `sample_percentage` — integer 0–100
-- `dedup_window` — seconds
-
-Matching is a lookup on `(client_id, event_name)`. Multiple rules can match; each is evaluated independently.
-
-### Sampling
-
-Deterministic per `(user_id, rule_id)` using an MD5 hash mapped to 0–99:
-
-```ts
-// src/utils/sampling.util.ts
-hash(`${userId}:${ruleId}`) % 100 < sample_percentage
-```
-
-The same user always gets the same in/out decision for a given rule.
-
-### Scheduling
-
-`scheduled_at = now + rule.delay` (seconds). The dispatch row is the durable source of truth.
-
-- **Near-term** (delay ≤ 6 hours): enqueued into BullMQ immediately as a delayed job.
-- **Far-out** (delay > 6 hours): stored in Postgres only until the cron sweeper picks it up.
-
-### Deduplication
-
-Before creating a dispatch, the service checks whether the same `(client_id, user_id, interview_id)` already has a `sent_at` within the rule's `dedup_window`. If so, the dispatch is skipped.
-
-Dedup is checked at schedule time only (not re-checked in the worker before sending).
-
-### Dispatch
-
-The BullMQ worker loads the dispatch row and calls the sender stub, which logs:
-
-```json
-{
-  "client_id": "...",
-  "user_id": "...",
-  "interview_id": 1,
-  "scheduled_at": "...",
-  "timestamp": "..."
-}
-```
-
-No real email/SMS is sent.
-
----
-
-## Cron sweeper
-
-Runs on schedule `0 */6 * * *` (every 6 hours).
-
-Queries `dispatches` where:
-- `status = 'scheduled'`
-- `sent_at IS NULL`
-- `scheduled_at <= now + 6 hours`
-
-For each match, enqueues a BullMQ job with the remaining delay. Job IDs use the pattern `dispatch-{id}` to reduce duplicate enqueues.
-
----
-
-## Dispatch lifecycle
-
-| Status | Meaning |
-|--------|---------|
-| `scheduled` | Created after rule match + sampling + dedup passed |
-| `sent` | Worker successfully called the sender stub |
-| `failed` | Sender returned failure |
-
----
-
-## Data model
-
-| Table | Purpose |
-|-------|---------|
-| `client_entity` | Tenant record (`id`, `name`, `email`, `api_key`) |
-| `interviews` | Interview configs (`id`, `name`, `created_by`) |
-| `events` | Raw ingested events |
-| `rule` | Maps `(client_id, event_name)` → `interview_id` with delay/sampling/dedup settings |
-| `dispatch` | Scheduled send per matched rule; tracks `status`, `scheduled_at`, `sent_at`, `email`, `phone` |
-
-TypeORM `synchronize: true` is enabled — tables are auto-created from entities on startup. There are no migration scripts.
-
----
-
-## API
-
-All protected routes require a JWT in the `Authorization` header:
-
-```
-Authorization: Bearer <token>
-```
-
-Obtain a token from `POST /auth/register/client`.
-
-### `GET /`
-
-Public health check. Returns `"Hello World!"`.
-
-### `POST /auth/register/client`
-
-Public. Register a new client.
-
-**Request body:**
-```json
-{
-  "name": "Gokhana",
-  "email": "abc@gmail.gokhana.com"
-}
-```
-
-**Response:**
-```json
-{
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
-### `POST /interviews/create`
-
-Create an interview configuration for the authenticated client.
-
-**Request body:**
-```json
-{
-  "name": "test1",
-  "link": "https://www.listenery.ai/"
-}
-```
-
-**Response:**
-```json
-{
-  "message": "Interview Created"
-}
-```
-
-### `POST /rules/create`
-
-Create a rule linking an event name to an interview.
-
-**Request body:**
-```json
-{
-  "client_id": "7e60703a-411a-4560-b9e5-9735e3ad59cd",
-  "event_name": "interview_scheduled",
-  "interview_id": 1,
-  "delay": 30,
-  "sample_percentage": 90,
-  "dedup_window": 3600
-}
-```
-
-**Response:**
-```json
-{
-  "message": "Rule created successfully"
-}
-```
-
-### `POST /event/created`
-
-Ingest a product event. Persists the event and returns immediately; processing is async.
-
-**Request body:**
-```json
-{
-  "event_name": "interview_scheduled",
-  "user_id": "user_456",
-  "email": "rahul.sharma@example.com",
-  "phone": "9876543210",
-  "properties": {
-    "position": "Backend Developer",
-    "interview_type": "Technical",
-    "location": "Online"
-  },
-  "timestamp": "2026-08-13T17:10:00.000Z"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true
-}
+### 2. Clone and install
+
+```bash
+git clone <your-repo-url>
+cd backend
+npm install
 ```
 
 ---
 
-## Swagger
+### 3. Start Postgres and Redis
 
-Interactive API docs are available at:
+Run these once (skip if you already have containers running):
 
+```bash
+docker run -d \
+  --name listenery-postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=listenery \
+  -p 5432:5432 \
+  postgres:16
+
+docker run -d \
+  --name listenery-redis \
+  -p 6379:6379 \
+  redis:7
 ```
-http://localhost:3000/api
+
+Verify they are up:
+
+```bash
+docker ps
 ```
 
-Use **Authorize** with the JWT from `/auth/register/client` to test protected endpoints.
+> **Using your own Postgres/Redis?** Point `DATABASE_URL` and `REDIS_URL` in `.env` at your instances instead.
 
 ---
 
-## Getting started
-
-### Prerequisites
-
-- Node.js 22+
-- PostgreSQL
-- Redis
-
-### Environment variables
+### 4. Configure environment
 
 Create a `.env` file in the project root:
 
 ```env
-DATABASE_URL=postgresql://user:password@localhost:5432/listenery
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/listenery
 REDIS_URL=redis://localhost:6379
 PORT=3000
-secret=your-jwt-secret
+secret=long-random-string
 ```
 
-### Run locally
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | Postgres connection string |
+| `REDIS_URL` | Redis connection string (used by BullMQ) |
+| `PORT` | HTTP port (default `3000`) |
+| `secret` | JWT signing secret |
+
+Tables are created automatically on first startup (`TypeORM synchronize: true`). No migrations needed.
+
+---
+
+### 5. Start the server
 
 ```bash
-# Install dependencies
-npm install
-
-# Start in watch mode (API + BullMQ worker + cron)
 npm run start:dev
 ```
 
-The server starts on `PORT` (default `3000`).
+You should see:
 
-### Typical setup flow
-
-1. `POST /auth/register/client` → save the JWT
-2. `POST /interviews/create` → note the interview `id`
-3. `POST /rules/create` → link your `event_name` to that interview
-4. `POST /event/created` → ingest events and watch server logs for dispatch output
-
----
-
-## Testing
-
-```bash
-npm run test
+```
+Server is running on port 3000
 ```
 
-Currently includes the default NestJS scaffold test for `AppController`. Sampling and deduplication logic are not yet covered by dedicated unit tests.
+Confirm the app is alive:
+
+```bash
+curl http://localhost:3000
+# → Hello World!
+```
+
+Swagger UI: **http://localhost:3000/api**
 
 ---
 
-## Trade-offs and next steps
+### 6. End-to-end walkthrough
 
-**What is implemented:**
-- JWT-based client auth
-- Async event processing via in-process EventEmitter
-- Rule matching, deterministic MD5 sampling, dedup, and delayed dispatch
-- Postgres as durable schedule + BullMQ for near-term execution
-- 6-hour cron sweeper as a backstop for far-out or missed dispatches
-- Logging-only sender stub
-- Swagger docs at `/api`
+The easiest way to try the full flow is through **Swagger** — every endpoint has a pre-filled
+example body, so there's nothing to type by hand.
 
-**Known limitations:**
-- Single-process deployment (API, worker, cron together)
-- No dedup re-check at send time
-- No `QUEUED` / `CANCELLED` dispatch states
-- No retry/backoff on sender failures
-- TypeORM auto-sync instead of migrations
-- Minimal test coverage
+1. Open **http://localhost:3000/api**
+2. Run `POST /auth/register/client` → copy the `token` from the response.
+3. Click **Authorize** (top right) → enter `Bearer <token>` → this authorizes all subsequent calls.
+4. Run the remaining endpoints in order, using each one's example body as a starting point:
+   - `POST /interviews/create` — creates the interview a matched event will dispatch.
+   - `POST /rules/create` — links an event name to that interview, with `delay`, `sample_percentage`, and `dedup_window`. Use a short `delay` (seconds) so you see a dispatch quickly, and `sample_percentage: 100` so nothing gets sampled out while testing.
+   - `POST /event/created` — ingests a product event. The response returns immediately; everything else happens in the background.
 
-**Possible improvements:**
-- Return `event_id` from `POST /event/created`
-- Add GET endpoints for event/dispatch status
-- Split API, worker, and cron into separate processes
-- Add unit tests for sampling and deduplication
-- Re-check dedup in the worker before sending
-- Replace `synchronize: true` with proper migrations
+> The interview-create response doesn't return an ID. On a fresh database the first interview is `interview_id: 1` — check the `interviews` table if you're unsure which ID to reference in your rule.
+
+Prefer curl? Every route above also works directly; just add `-H "Authorization: Bearer $TOKEN"` and the JSON body shown in Swagger for that endpoint.
+
+---
+
+### 7. Verify it worked
+
+Watch the **server terminal**. After your rule's delay elapses, you should see logs like:
+
+```
+Event 1 created for client ...
+Processing event 1 for client ...
+Found 1 rule(s) ...
+Created dispatch 1 for user user_456 ...
+Adding dispatch 1 to queue with delay 10000ms ...
+Processing job dispatch-1 of type send-dispatch
+===== DISPATCH SENDER STUB =====
+{
+  "client_id": "...",
+  "user_id": "user_456",
+  "interview_id": 1,
+  ...
+}
+================================
+Dispatch 1 sent successfully
+```
+
+That stub log is the simulated interview invite send.
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `ECONNREFUSED` on Postgres | Ensure the Postgres container is running: `docker start listenery-postgres` |
+| `ECONNREFUSED` on Redis | Ensure the Redis container is running: `docker start listenery-redis` |
+| `Token missing` / `401` | Add header `Authorization: Bearer <token>` |
+| `ClientEntity already exists` | Use a different email or drop the DB and restart |
+| No dispatch logs | Check `event_name` matches the rule, `sample_percentage` is 100, and `client_id` in the rule matches your JWT |
+| Dispatch takes too long | Lower `delay` in the rule (value is in **seconds**) |
+| DB SSL connection error | The app expects SSL (`rejectUnauthorized: false`). Use a cloud Postgres URL, or disable SSL in `src/app.module.ts` for local non-SSL Postgres |
+
+---
+
+## NPM scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run start:dev` | Dev server with hot reload |
+| `npm run start:prod` | Production (`node dist/main` — run `npm run build` first) |
+| `npm run build` | Compile TypeScript |
+| `npm run test` | Run tests |
+
+---
+
+## API reference
+
+All protected routes need: `Authorization: Bearer <token>`
+
+Full request/response schemas and example bodies live in Swagger at **`/api`** — this table is
+just a map of what exists.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/` | Public | Health check |
+| `POST` | `/auth/register/client` | Public | Register client, returns JWT |
+| `POST` | `/interviews/create` | JWT | Create interview config |
+| `POST` | `/rules/create` | JWT | Create event → interview rule |
+| `POST` | `/event/created` | JWT | Ingest a product event |
+
+---
+
+## How it works (short)
+
+1. `POST /event/created` saves the event and returns immediately.
+2. An in-process listener matches rules, applies sampling + dedup, and creates a dispatch row.
+3. Dispatches due within 6 hours are queued in BullMQ (Redis).
+4. A worker sends the stub (logs the payload) and marks the dispatch `sent`.
+5. A cron job every 6 hours picks up any far-out or missed dispatches.
+
+---
+
+## Project structure
+
+```
+src/
+├── controllers/     # HTTP routes
+├── services/        # Business logic, cron, event listener
+├── processors/      # BullMQ worker
+├── entities/        # TypeORM models
+├── dtos/            # Request validation
+├── guards/          # JWT auth
+└── swagger/         # Swagger example bodies
+```
