@@ -1,8 +1,8 @@
 {
-  "name": "backend",
+  "name": "Event-driven-engine",
   "version": "0.0.1",
   "description": "",
-  "author": "",
+  "author": "Akshat",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {

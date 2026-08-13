@@ -10,8 +10,8 @@ async function bootstrap() {
   const reflector = app.get(Reflector);
 
   const config = new DocumentBuilder()
-    .setTitle('Assignment Listenery API')
-    .setDescription('API for client registration, event ingestion, interview configurations, and dispatch rules')
+    .setTitle('Event-Trigger-Engine')
+    .setDescription('A lightweight background job processing engine for triggering, scheduling, and executing asynchronous tasks reliably using queues and workers.')
     .setVersion('1.0')
     .addBearerAuth(
       {
