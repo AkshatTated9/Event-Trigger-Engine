@@ -1,9 +1,6 @@
 import { IsNotEmpty, IsString, IsInt, Max, Min } from 'class-validator';
 
 export class CreateRuleDto {
-  @IsString({ message: 'client_id must be a string' })
-  @IsNotEmpty({ message: 'client_id is required' })
-  client_id: string;
 
   @IsString({ message: 'event_name must be a string' })
   @IsNotEmpty({ message: 'event_name is required' })

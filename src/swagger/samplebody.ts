@@ -18,7 +18,6 @@ export const swaggerExamples = {
   interviewConfig: {
     summary: 'Interview configuration',
     value: {
-      client_id: '7e60703a-411a-4560-b9e5-9735e3ad59cd',
       event_name: 'interview_scheduled',
       interview_id: 1,
       delay: 30,

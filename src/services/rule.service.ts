@@ -11,8 +11,9 @@ export class RuleService {
     private readonly ruleRepository: Repository<Rule>,
   ) {}
 
-  async createRule(dto: CreateRuleDto) {
-    const rule = this.ruleRepository.create(dto);
+  async createRule(dto: CreateRuleDto,client) {
+    let client_id=client.client_id;
+    const rule = this.ruleRepository.create({...dto,client_id});
     let rulecreated=await this. ruleRepository.save(rule);
     if(rulecreated){
         return {message:"Rule created successfully"}

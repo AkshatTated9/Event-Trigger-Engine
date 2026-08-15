@@ -40,10 +40,6 @@ export class DispatchService {
     });
   }
 
-  /**
-   * Sender stub: just log the payload, no actual email/SMS.
-   * Returns success.
-   */
   async sendDispatch(dispatch: Dispatch): Promise<boolean> {
     console.log('===== DISPATCH SENDER STUB =====');
     console.log(JSON.stringify({

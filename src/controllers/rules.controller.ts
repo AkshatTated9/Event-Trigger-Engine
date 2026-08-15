@@ -7,6 +7,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import { CurrentClient } from 'src/decoraters/currentclient.decorater';
 import { CreateRuleDto } from 'src/dtos/create-rule.dto';
 import { RuleService } from 'src/services/rule.service';
 import { swaggerExamples } from 'src/swagger/samplebody';
@@ -27,7 +28,7 @@ export class RulesController {
   })
   @ApiCreatedResponse({ description: 'Rule created successfully' })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid JWT token' })
-  async createRule(@Body() body: CreateRuleDto) {
-    return this.ruleService.createRule(body);
+  async createRule(@Body() body: CreateRuleDto,@CurrentClient() client) {
+    return this.ruleService.createRule(body,client);
   }
 }
