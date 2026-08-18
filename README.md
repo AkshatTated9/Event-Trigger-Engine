@@ -161,8 +161,8 @@ That stub log is the simulated interview invite send.
 
 | Problem | Fix |
 |---------|-----|
-| `ECONNREFUSED` on Postgres | Ensure the Postgres container is running: `docker start listenery-postgres` |
-| `ECONNREFUSED` on Redis | Ensure the Redis container is running: `docker start listenery-redis` |
+| `ECONNREFUSED` on Postgres | Ensure the Postgres container is running: `docker start-postgres` |
+| `ECONNREFUSED` on Redis | Ensure the Redis container is running: `docker start-redis` |
 | `Token missing` / `401` | Add header `Authorization: Bearer <token>` |
 | `ClientEntity already exists` | Use a different email or drop the DB and restart |
 | No dispatch logs | Check `event_name` matches the rule, `sample_percentage` is 100, and `client_id` in the rule matches your JWT |
