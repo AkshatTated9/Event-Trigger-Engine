@@ -44,15 +44,15 @@ Run these once (skip if you already have containers running):
 
 ```bash
 docker run -d \
-  --name listenery-postgres \
+  --name postgres \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=listenery \
+  -e POSTGRES_DB=DB_LINK \
   -p 5432:5432 \
   postgres:16
 
 docker run -d \
-  --name listenery-redis \
+  --name-redis \
   -p 6379:6379 \
   redis:7
 ```
@@ -72,7 +72,7 @@ docker ps
 Create a `.env` file in the project root:
 
 ```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/listenery
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432
 REDIS_URL=redis://localhost:6379
 PORT=3000
 secret=long-random-string
