@@ -1,4 +1,4 @@
-<h1 align="center">Listenery Event Trigger Engine</h1>
+<h1 align="center"> Event Trigger Engine</h1>
 
 <p align="center">
   NestJS backend that ingests product events and schedules AI interview dispatches.
