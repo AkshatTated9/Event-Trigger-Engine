@@ -26,11 +26,11 @@ export const swaggerExamples = {
     },
   },
 
-  listenery: {
-    summary: 'Listenery',
+  interview: {
+    summary: 'google',
     value: {
       name: 'test1',
-      link: 'https://www.listenery.ai/',
+      link: 'https://www.google.ai/',
     },
   },
 

@@ -23,7 +23,7 @@ export class InterviewsController {
   @ApiBody({
     description: 'Interview configuration payload',
     examples: {
-      listenery: swaggerExamples.listenery,
+      interview: swaggerExamples.interview,
     },
   })
   @ApiCreatedResponse({ description: 'Interview configuration created successfully' })
